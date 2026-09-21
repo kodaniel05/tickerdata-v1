@@ -567,3 +567,57 @@ class StockComparisonTests(SimpleTestCase):
         self.assertEqual(response.status_code, 405)
         self.assertEqual(response["Allow"], "GET")
         service.assert_not_called()
+
+
+class StockSearchTests(SimpleTestCase):
+    def test_real_search_boundary_returns_only_supported_unique_equities(self):
+        quotes = [
+            {"symbol": " aapl ", "longname": "Apple Inc.", "quoteType": "EQUITY", "extra": 123},
+            {"symbol": "AAPL", "shortname": "Duplicate", "quoteType": "EQUITY"},
+            {"symbol": "BRK-B", "shortname": "Berkshire Hathaway", "quoteType": "EQUITY"},
+            {"symbol": "SPY", "longname": "Fund", "quoteType": "ETF"},
+            {"symbol": "BAD/SYMBOL", "longname": "Bad", "quoteType": "EQUITY"},
+            {"symbol": "NONAME", "quoteType": "EQUITY"},
+            None,
+        ]
+        with patch.object(market_data.yf, "Search") as search, patch.object(market_data.yf, "download") as download:
+            search.return_value.quotes = quotes
+            response = self.client.get("/api/search/", {"q": " apple "})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"results": [
+            {"symbol": "AAPL", "name": "Apple Inc."},
+            {"symbol": "BRK-B", "name": "Berkshire Hathaway"},
+        ]})
+        search.assert_called_once_with("apple", max_results=8, news_count=0, lists_count=0,
+                                       include_cb=False, recommended=0, timeout=10)
+        download.assert_not_called()
+
+    def test_blank_query_and_long_query_do_not_call_provider(self):
+        with patch.object(market_data.yf, "Search") as search:
+            for query, status in [("", 200), ("   ", 200), ("a" * 81, 400)]:
+                response = self.client.get("/api/search/", {"q": query})
+                self.assertEqual(response.status_code, status)
+            self.assertEqual(self.client.get("/api/search/").json(), {"results": []})
+            search.assert_not_called()
+
+    def test_limit_and_no_results(self):
+        with patch.object(market_data.yf, "Search") as search:
+            search.return_value.quotes = [{"symbol": f"A{i}", "longname": f"Company {i}", "quoteType": "EQUITY"} for i in range(12)]
+            self.assertEqual(len(self.client.get("/api/search/", {"q": "a"}).json()["results"]), 8)
+            search.return_value.quotes = []
+            self.assertEqual(self.client.get("/api/search/", {"q": "unmatched"}).json(), {"results": []})
+
+    def test_provider_and_schema_errors_are_fixed_502(self):
+        with patch.object(market_data.yf, "Search", side_effect=TimeoutError("private details")):
+            response = self.client.get("/api/search/", {"q": "apple"})
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json(), {"error": "Market search is unavailable."})
+        with patch.object(market_data.yf, "Search") as search:
+            search.return_value.quotes = {"unexpected": "schema"}
+            self.assertEqual(self.client.get("/api/search/", {"q": "apple"}).status_code, 502)
+
+    def test_post_is_rejected_before_search(self):
+        with patch.object(market_data.yf, "Search") as search:
+            response = self.client.post("/api/search/", {"q": "apple"})
+        self.assertEqual(response.status_code, 405)
+        search.assert_not_called()

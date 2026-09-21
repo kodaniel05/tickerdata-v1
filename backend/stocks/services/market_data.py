@@ -80,3 +80,38 @@ def fetch_market_data(symbol: str) -> pd.DataFrame:
         raise
     except ValueError as exc:
         raise RuntimeError(f"Invalid market data returned for {symbol}.") from exc
+
+
+def search_symbols(query: str) -> list[dict]:
+    """Return a small set of equities supported by the existing ticker path."""
+    query = query.strip()
+    if len(query) > 80:
+        raise ValueError("Search query is too long.")
+    if not query:
+        return []
+    try:
+        quotes = yf.Search(
+            query, max_results=8, news_count=0, lists_count=0,
+            include_cb=False, recommended=0, timeout=10,
+        ).quotes
+    except Exception as exc:
+        raise RuntimeError("Market search failed.") from exc
+    if not isinstance(quotes, list):
+        raise RuntimeError("Invalid search response.")
+    results = []
+    seen = set()
+    for quote in quotes:
+        if not isinstance(quote, dict) or quote.get("quoteType") != "EQUITY":
+            continue
+        try:
+            symbol = normalize_symbol(quote.get("symbol"))
+        except InvalidTicker:
+            continue
+        name = quote.get("longname") or quote.get("shortname")
+        if symbol in seen or not isinstance(name, str) or not name.strip():
+            continue
+        results.append({"symbol": symbol, "name": name.strip()})
+        seen.add(symbol)
+        if len(results) == 8:
+            break
+    return results

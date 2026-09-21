@@ -81,7 +81,7 @@ only the existing empty `backend/stocks/tests.py` was modified.
   Created before implementation so behavior can be reviewed independently.
 
 `docs/ENGINEERING_LOG.md`
-- Lines 1–430 — this document records scope, changed functions, verified ranges,
+- Lines 1–530 — this document records scope, changed functions, verified ranges,
   behavioral differences, validation evidence and limitations for human review.
 
 ### Behavioral changes
@@ -428,3 +428,103 @@ Requirements and METRICS.md remain unchanged; daily/year-bounded, sequential,
 atomic, no-cache and development-settings limitations remain accurately recorded.
 This section and current references were checked with nl -ba. No frontend work,
 dependencies, staging, commits, pushes, remote changes or server left running.
+
+## Phase 3A — Search-First Stock Analysis UI
+
+Date: 2026-09-21.
+
+### Goal, scope and design
+
+Implement the supplied two-state mockup: no default stock, a centered intro
+search, then a compact persistent search above the selected stock's analysis.
+Retain navy serif values, sans-serif controls, pale blue chart and thin editorial
+dividers. The laptop header pairs company/session with close/open; the statistics
+grid adds existing metric definitions and a correctly positioned RSI 30–70 band.
+No new calculations, comparison UI, cards, profiles, logos or default AAPL data.
+The user authorized continuation over reviewed uncommitted Phase 2B work; on
+resumption Phase 2B was committed separately as 3152151. This agent did not commit.
+
+### Files and functions (current ranges verified with nl -ba)
+
+- `backend/stocks/services/market_data.py`, `search_symbols()` 85–117: one bounded
+  yfinance.Search, max eight supported unique equities; only symbol/name returned.
+- `backend/stocks/views.py`, import 4 and `stock_search()` 59–67 including
+  decorator: GET JSON endpoint, fixed 400/502 errors, no raw provider details.
+- `backend/stocks/urls.py`, import 3 and route 9: `/api/search/?q=...`.
+- `backend/stocks/tests.py`, `StockSearchTests` 572–623: five deterministic tests;
+  success/filtering 573–593, blank/long input 595–601, limit/empty 603–608,
+  provider/schema errors 610–617, POST 619–623. All prior 67 tests retained.
+- `frontend/app/page.tsx`, `Home()` 8–29: intro/analysis selection state and waves.
+- `frontend/app/layout.tsx`, metadata 4–7 and `RootLayout()` 9–11: app identity and
+  local system fonts instead of scaffold Google font downloads.
+- `frontend/app/globals.css`, 1–98: tokens/intro 3–15, search 16–29, analysis and
+  chart 30–56, statistics/RSI/errors 57–77, responsive rules 78–98.
+- `frontend/next.config.ts`, configuration 3–8: same-origin API rewrite to Django
+  at 127.0.0.1:8000. Preserve Django trailing slashes to avoid a redirect loop.
+- New `frontend/lib/market.ts`, types 1–8, `getMarket()` 10–25, `number()` 27–30,
+  `sessionDate()` 32–37: API types, friendly errors, finite formatting and dates.
+- New `frontend/components/StockSearch.tsx`, `StockSearch()` 6–74, search effect
+  15–32 and selection 34–37: native debounce, cancellation and combobox controls.
+- New `frontend/components/StockOverview.tsx`, `StockOverview()` 8–37: independent
+  summary request/retry, compact identity/price header, chart and metric layout.
+- New `frontend/components/PriceChart.tsx`, `PriceChart()` 9–82: range state,
+  ResizeObserver 18–22, cancellable history 23–29, SVG/tooltip 41–81.
+- New `frontend/components/MetricGrid.tsx`, metric labels/context 3–12 and
+  `MetricGrid()` 14–40: eight returned metrics, unit formatting and RSI marker.
+- `docs/ENGINEERING_LOG.md`, 432–530 records Phase 3A; line 84 updates the
+  document range. METRICS.md remains accurate and unchanged.
+
+### Behavior, connection and dependencies
+
+Search starts after one nonblank character, debounced 250ms; input changes abort
+older fetches and ignore aborted responses. Fetches bypass browser cache (including
+old redirect entries). Arrow keys, Enter, Escape and clicks
+control selection. Preserve the chosen company name without a profile request.
+Blank search returns an empty list without Yahoo; over 80 characters returns 400;
+provider failure returns 502. yfinance 1.7.0 Search was inspected locally before
+use; news/lists/company breakdown/recommendations are disabled. Non-equities and
+symbols unsupported by existing normalization are omitted, not hardcoded.
+Native SVG was chosen over a chart dependency: one line, light fill, five grid
+levels and date/close tooltip, including arrow-key exploration. Default 3M;
+1M/6M/1Y affect history only. Stock changes remount analysis and cancel old work.
+Summary/chart loading and retry are independent; unavailable metrics show an em
+dash. Backend dollar volume is already in millions, formatted as M/B. Prices and
+traded value omit a currency symbol because the API does not identify currency;
+the UI states that values use the listing's quote currency. No fabricated changes.
+No dependencies were added; requirements/package manifests/lockfile unchanged.
+Run backend with `source ../.venv/bin/activate` then `python manage.py runserver`
+from backend; run `npm run dev` from frontend. Same-origin `/api/` needs no CORS.
+
+### Validation and live evidence
+
+pip check PASS; Django check PASS; 72 backend tests PASS (0.277s); frontend lint,
+`npx tsc --noEmit`, production build and git diff --check PASS. Production build
+uses no external font service. Untracked source files were read and checked too.
+Native Node/TypeScript probes PASS: null/undefined/NaN/Infinity formatting, zero,
+signed percentages, session date preservation, friendly 400/404/502/network errors.
+Real browser and proxied HTTP searches PASS for a, app, amd, apple, microsoft:
+Agilent/AMD/AAPL, AppLovin/Apple, AMD, Apple, and Microsoft respectively appeared.
+Real AAPL and AMD summary/history returned 200, as_of 2026-09-21, 64 3M rows;
+browser values matched the live API snapshots (AAPL 338.98, AMD 615.52).
+Keyboard/click selection, Escape, top-search switching, loading, range changes,
+chart keyboard tooltip and mobile wrapping were reviewed in the browser.
+Production request trace: selection 1 summary + 1 history; range change history
+only; stock switch 1 new summary + 1 history. Rapid m/mic/microsoft input produced
+only the final search. Development React Strict Mode can start/abort extra effect
+requests; no polling/cache was introduced. Browser widths were measured in CSS
+pixels: all metrics visible near 1280x800 (statistics bottom 787px), and no page
+horizontal overflow at 390px; chart labels remain readable via responsive geometry.
+
+### Fixture incident and remaining limitations
+
+A temporary in-memory WSGI acceptance server on port 8000 survived an interrupted
+turn and returned Acceptance test labels. It monkeypatched search/summary only in
+that process; no such content was in frontend/backend runtime files. The process
+was stopped and replaced by the real manage.py server. All five queries and both
+stocks were then rechecked through the real development UI. No fixture server is
+left running. Real Django is retained for local UI review.
+Selection is component state: reload returns to intro; shareable ticker URLs are
+deferred. Search coverage/ranking and daily prices depend on Yahoo; bars can be
+partial/stale. Summary and history are independent requests, not an atomic quote
+snapshot. No cache, polling, intraday data, currency lookup or deployment hardening.
+No staging, commit, push, remote changes or dependency installation occurred.

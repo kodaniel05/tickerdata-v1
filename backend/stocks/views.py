@@ -1,7 +1,7 @@
 from django.http import JsonResponse
 from django.views.decorators.http import require_GET
 
-from .services.market_data import InvalidTicker, NoMarketData
+from .services.market_data import InvalidTicker, NoMarketData, search_symbols
 from .services.stock_service import StockService
 
 
@@ -54,3 +54,14 @@ def stock_compare(request):
     return JsonResponse(
         {"symbols": symbols, "results": results}, json_dumps_params={"allow_nan": False}
     )
+
+
+@require_GET
+def stock_search(request):
+    try:
+        results = search_symbols(request.GET.get("q", ""))
+    except ValueError:
+        return JsonResponse({"error": "Invalid search query."}, status=400)
+    except RuntimeError:
+        return JsonResponse({"error": "Market search is unavailable."}, status=502)
+    return JsonResponse({"results": results})
