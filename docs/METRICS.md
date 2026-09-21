@@ -58,8 +58,10 @@ Examples: 100 to 110 over one return is 10.0 percentage points. For
 to all metrics. It returns symbol, as_of, price, open, and a metrics dictionary:
 SMA/EMA 20, RSI 14, cumulative/average return 30, volatility/ADR%/dollar volume 20.
 Keys ending in `d` denote trading periods. Results support strict JSON encoding.
-Raised provider exceptions become RuntimeError; invalid input/data raises ValueError.
-If yfinance suppresses an upstream error and returns empty data, it is rejected
-as unavailable data (ValueError), not reported as a successful empty summary.
-No persistent application cache, currency conversion, API, or separate quote
-request is part of this contract.
+Invalid symbols raise InvalidTicker; empty responses raise NoMarketData (both
+ValueError subclasses). Raised provider exceptions and malformed fetched OHLCV
+become RuntimeError. Direct normalization still uses ValueError for malformed data.
+Suppressed Yahoo errors may appear as unavailable data, not proof of an unknown
+listing. No persistent application cache, currency conversion or separate quote
+request is part of the engine. The Django endpoint maps these errors to 400, 404
+and 502 respectively; metric definitions and the successful summary are unchanged.

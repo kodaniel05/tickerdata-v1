@@ -7,6 +7,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 import pandas as pd
+from django.test import SimpleTestCase
 
 from .services import market_data, metrics
 from .services.stock_service import StockService
@@ -303,3 +304,93 @@ class StockServiceTests(TestCase):
         with patch("stocks.services.stock_service.fetch_market_data", side_effect=ValueError("No market data")):
             with self.assertRaisesRegex(ValueError, "No market data"):
                 StockService("AAPL").summary()
+
+
+class StockSummaryAPITests(SimpleTestCase):
+    def test_success_returns_service_json_and_calls_summary_once(self):
+        expected = {
+            "symbol": "AAPL", "as_of": "2026-09-18T00:00:00",
+            "price": 100.0, "open": 99.0, "metrics": {"sma_20": None},
+        }
+        with patch("stocks.views.StockService") as service:
+            service.return_value.summary.return_value = expected
+            response = self.client.get("/api/stocks/AAPL/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/json")
+        self.assertEqual(response.json(), expected)
+        json.loads(response.content, parse_constant=lambda value: self.fail(value))
+        service.assert_called_once_with("AAPL")
+        service.return_value.summary.assert_called_once_with()
+
+    def test_lowercase_uses_real_service_and_one_download(self):
+        with patch.object(market_data.yf, "download", return_value=bars(range(100, 150))) as download:
+            with patch("stocks.services.stock_service.fetch_market_data", wraps=market_data.fetch_market_data) as fetch:
+                response = self.client.get("/api/stocks/aapl/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["symbol"], "AAPL")
+        fetch.assert_called_once_with("AAPL")
+        self.assertEqual(download.call_count, 1)
+        self.assertEqual(download.call_args.args, ("AAPL",))
+
+    def test_malformed_ticker_returns_400_without_fetching(self):
+        with patch.object(market_data.yf, "download") as download:
+            response = self.client.get("/api/stocks/A$PL/")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"error": "Invalid ticker symbol."})
+        download.assert_not_called()
+
+    def test_empty_provider_response_returns_404(self):
+        for empty in [None, pd.DataFrame()]:
+            with self.subTest(response=empty):
+                with patch.object(market_data.yf, "download", return_value=empty):
+                    response = self.client.get("/api/stocks/UNKNOWN/")
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.json(), {"error": "No market data available."})
+
+    def test_provider_exception_returns_502_without_internal_details(self):
+        with patch.object(market_data.yf, "download", side_effect=TimeoutError("private provider details")):
+            response = self.client.get("/api/stocks/AAPL/")
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json(), {"error": "Market data provider failed."})
+
+    def test_malformed_provider_response_returns_502_not_400_or_404(self):
+        for malformed in [{"Close": [100]}, bars([100]).drop(columns="Volume")]:
+            with self.subTest(response=type(malformed).__name__):
+                with patch.object(market_data.yf, "download", return_value=malformed):
+                    response = self.client.get("/api/stocks/AAPL/")
+                self.assertEqual(response.status_code, 502)
+                self.assertEqual(response.json(), {"error": "Market data provider failed."})
+
+    def test_post_is_rejected_without_analysis(self):
+        with patch("stocks.views.StockService") as service:
+            response = self.client.post("/api/stocks/AAPL/")
+        self.assertEqual(response.status_code, 405)
+        self.assertEqual(response["Allow"], "GET")
+        service.assert_not_called()
+
+    def test_error_types_distinguish_invalid_ticker_and_missing_data(self):
+        with self.assertRaises(market_data.InvalidTicker):
+            market_data.normalize_symbol("A$PL")
+        with self.assertRaises(market_data.NoMarketData):
+            market_data.normalize_ohlcv(pd.DataFrame(), "AAPL")
+
+    def test_malformed_provider_data_preserves_normalization_error_cause(self):
+        with patch.object(market_data.yf, "download", return_value=bars([100]).drop(columns="Volume")):
+            with self.assertRaisesRegex(RuntimeError, "Invalid market data") as caught:
+                market_data.fetch_market_data("AAPL")
+        self.assertIsInstance(caught.exception.__cause__, ValueError)
+
+    def test_dated_rows_without_columns_are_provider_failure(self):
+        malformed = bars([100]).iloc[:, :0]
+        with patch.object(market_data.yf, "download", return_value=malformed):
+            response = self.client.get("/api/stocks/AAPL/")
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json(), {"error": "Market data provider failed."})
+
+    def test_hyphenated_ticker_reaches_real_service(self):
+        with patch.object(market_data.yf, "download", return_value=bars(range(100, 150))) as download:
+            response = self.client.get("/api/stocks/BRK-B/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["symbol"], "BRK-B")
+        self.assertEqual(download.call_count, 1)
+        self.assertEqual(download.call_args.args, ("BRK-B",))

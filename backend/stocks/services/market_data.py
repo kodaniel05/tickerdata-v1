@@ -9,20 +9,30 @@ import yfinance as yf
 OHLCV = ("Open", "High", "Low", "Close", "Volume")
 
 
+class InvalidTicker(ValueError):
+    """Ticker syntax is invalid; no provider request should be made."""
+
+
+class NoMarketData(ValueError):
+    """The provider returned no observations; listing existence is unknown."""
+
+
 def normalize_symbol(symbol: str) -> str:
     if not isinstance(symbol, str):
-        raise ValueError("Ticker must be a string.")
+        raise InvalidTicker("Ticker must be a string.")
     symbol = symbol.strip().upper()
     if not re.fullmatch(r"[A-Z][A-Z0-9]{0,9}(?:[.-][A-Z0-9]{1,4})?", symbol):
-        raise ValueError("Invalid equity ticker.")
+        raise InvalidTicker("Invalid equity ticker.")
     return symbol
 
 
 def normalize_ohlcv(data: pd.DataFrame, symbol: str) -> pd.DataFrame:
     """Select one ticker, keep last duplicate, and reject unusable bars."""
     symbol = normalize_symbol(symbol)
-    if not isinstance(data, pd.DataFrame) or data.empty:
-        raise ValueError("No market data returned.")
+    if data is None or (isinstance(data, pd.DataFrame) and len(data.index) == 0):
+        raise NoMarketData("No market data returned.")
+    if not isinstance(data, pd.DataFrame):
+        raise ValueError("Market data must be a DataFrame.")
     if not isinstance(data.index, pd.DatetimeIndex) or data.index.hasnans:
         raise ValueError("Market data requires valid datetime timestamps.")
 
@@ -64,4 +74,9 @@ def fetch_market_data(symbol: str) -> pd.DataFrame:
         )
     except Exception as exc:
         raise RuntimeError(f"Market data request failed for {symbol}.") from exc
-    return normalize_ohlcv(data, symbol)
+    try:
+        return normalize_ohlcv(data, symbol)
+    except NoMarketData:
+        raise
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid market data returned for {symbol}.") from exc

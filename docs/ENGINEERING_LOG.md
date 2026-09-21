@@ -24,12 +24,12 @@ only the existing empty `backend/stocks/tests.py` was modified.
 
 `backend/stocks/services/market_data.py`
 - Lines 1–9 — imports and required OHLCV fields; one explicit provider boundary.
-- Lines 12–18 — `normalize_symbol()` strips/uppercases and validates equity-style
+- Lines 20–26 — `normalize_symbol()` strips/uppercases and validates equity-style
   syntax before requests, preventing malformed and multi-symbol input.
-- Lines 21–55 — `normalize_ohlcv()` selects the requested ticker from flat or
+- Lines 29–65 — `normalize_ohlcv()` selects the requested ticker from flat or
   hierarchical columns, preserves/sorts dates, keeps the last duplicate, coerces
   numbers and rejects invalid bars; avoids fabricated or ambiguous observations.
-- Lines 58–67 — `fetch_market_data()` performs one bounded, nonthreaded daily
+- Lines 68–82 — `fetch_market_data()` performs one bounded, nonthreaded daily
   download with explicit adjustment/timeout options and contextual exceptions.
 
 `backend/stocks/services/metrics.py`
@@ -60,16 +60,16 @@ only the existing empty `backend/stocks/tests.py` was modified.
   Returns a plain dictionary with an ISO session timestamp for future JSON use.
 
 `backend/stocks/tests.py`
-- Lines 1–12 — standard-library unittest/mock and existing pandas imports.
-- Lines 15–22 — `bars()` builds deterministic, dated OHLCV fixtures.
-- Lines 25–29 — shared metric list for consistent boundary and purity checks.
-- Lines 32–176 — `MetricTests`: known-answer SMA/EMA/RSI/returns/volatility/ADR/ADV,
+- Lines 1–13 — standard-library unittest/mock, pandas and Django test imports.
+- Lines 16–23 — `bars()` builds deterministic, dated OHLCV fixtures.
+- Lines 26–30 — shared metric list for consistent boundary and purity checks.
+- Lines 33–177 — `MetricTests`: known-answer SMA/EMA/RSI/returns/volatility/ADR/ADV,
   latest-bar selection, invalid N, missing/short history, scalar types, no mutation,
   gap handling, zero volume, length one and nonfinite output rejection.
-- Lines 179–268 — `MarketDataTests`: symbol validation, exact download arguments,
+- Lines 180–269 — `MarketDataTests`: symbol validation, exact download arguments,
   flat/MultiIndex schemas, dates/duplicates, numeric conversion, missing fields,
   empty/malformed data and upstream exceptions. All provider calls are mocked.
-- Lines 271–305 — `StockServiceTests`: one retrieval, identical shared frame for
+- Lines 272–306 — `StockServiceTests`: one retrieval, identical shared frame for
   all metrics, one end-to-end mocked download, strict JSON and error propagation.
   Tests establish financial correctness and performance without a live provider
   or database. The Django runner discovers these unittest.TestCase classes.
@@ -77,11 +77,11 @@ only the existing empty `backend/stocks/tests.py` was modified.
 `docs/METRICS.md`
 - Lines 1–29 — raw-price, timestamp, validation and availability contract.
 - Lines 31–53 — exact formulas, units, seeds, boundaries and worked examples.
-- Lines 55–65 — summary schema, single-fetch behavior and failure policy.
+- Lines 55–67 — summary schema, single-fetch behavior and failure policy.
   Created before implementation so behavior can be reviewed independently.
 
 `docs/ENGINEERING_LOG.md`
-- Lines 1–203 — this document records scope, changed functions, verified ranges,
+- Lines 1–312 — this document records scope, changed functions, verified ranges,
   behavioral differences, validation evidence and limitations for human review.
 
 ### Behavioral changes
@@ -183,10 +183,10 @@ for average return, volatility, ADR% and dollar volume. In-memory mutation probe
 demonstrated the gap; no incorrect production implementation was written to disk.
 
 Additional changes in `backend/stocks/tests.py` (verified post-change lines):
-- 156–159 — `test_average_return_excludes_older_returns()`: excludes +900%; expects 5/11%.
-- 161–164 — `test_volatility_excludes_older_returns()`: excludes +100%; expects sqrt(200).
-- 166–170 — `test_adr_excludes_older_ranges()`: excludes 9900%; expects 15%.
-- 172–176 — `test_dollar_volume_excludes_older_observations()`: excludes $1tn; expects $250m.
+- 157–160 — `test_average_return_excludes_older_returns()`: excludes +900%; expects 5/11%.
+- 162–165 — `test_volatility_excludes_older_returns()`: excludes +100%; expects sqrt(200).
+- 167–171 — `test_adr_excludes_older_ranges()`: excludes 9900%; expects 15%.
+- 173–177 — `test_dollar_volume_excludes_older_observations()`: excludes $1tn; expects $250m.
 These four manual-answer regressions protect the requested trailing windows.
 This log updates affected class ranges above and records the acceptance results.
 
@@ -201,3 +201,112 @@ all ten metric functions receive the identical normalized DataFrame. Independent
 live QCOM rerun PASS: 251 rows, as_of 2026-09-18T00:00:00, one download, finite/null
 Python scalars and strict JSON. This does not count yfinance's internal HTTP calls.
 No dependencies, runtime source, API or frontend changes; no commit or push.
+
+## Phase 2A — Minimal Django Stock Summary API
+
+Date: 2026-09-20.
+
+### Goal
+
+Expose the validated summary through one Django JSON endpoint, preserving the
+one-fetch contract and existing calculations. No API framework or database work.
+
+### Files changed (current post-change ranges)
+
+- `backend/config/settings.py`, line 40 — `INSTALLED_APPS`: registers StocksConfig
+  so Django recognizes the existing application; unrelated defaults unchanged.
+- `backend/config/urls.py`, lines 18 and 22 — imports `include` and mounts the stock
+  URL configuration at `api/stocks/`; existing admin route retained.
+- `backend/stocks/urls.py`, lines 1–7 — new `urlpatterns` with a single string-ticker
+  route, named `stock-summary`; provides `/api/stocks/<ticker>/`.
+- `backend/stocks/views.py`, lines 1–18 — imports and `stock_summary()` (decorator
+  at 8, function 9–18): calls StockService once, returns its dictionary directly,
+  maps known failures, and uses require_GET and strict JSON serialization.
+- `backend/stocks/services/market_data.py`, lines 12–17 — `InvalidTicker` and
+  `NoMarketData`: two small ValueError subclasses distinguish client/data failures.
+  `normalize_symbol()` (20–26) now raises InvalidTicker; `normalize_ohlcv()`
+  (29–65, changed empty/schema checks 32–35) distinguishes empty data from malformed
+  non-DataFrames. `fetch_market_data()` (68–82, added 77–82) preserves NoMarketData
+  and wraps malformed downloaded data as RuntimeError, preserving the cause.
+- `backend/stocks/tests.py`, line 10 and lines 309–396 — SimpleTestCase import and
+  `StockSummaryAPITests`: eleven tests cover JSON success/nulls, normalization, call
+  counts, 400/404/502, malformed provider data, POST rejection and error types/causes.
+  Existing Phase 1 tests are unchanged apart from the added import shifting lines.
+- `docs/METRICS.md`, lines 61–67 — updates exception contract and HTTP mapping;
+  no formula, successful-response or observation-window changes.
+- `docs/ENGINEERING_LOG.md`, lines 205–282 — adds this phase's record; references
+  in lines 27–84 and 186–189 are updated to the current source locations.
+
+### Behavioral changes and limitations
+
+GET `/api/stocks/<ticker>/` returns the service dictionary as HTTP 200 JSON.
+InvalidTicker maps to 400 `{"error":"Invalid ticker symbol."}`; NoMarketData maps
+to 404 `{"error":"No market data available."}`; RuntimeError maps to 502
+`{"error":"Market data provider failed."}`. No exception text is exposed.
+Other methods reaching the view receive Django's normal 405 with Allow: GET;
+standard middleware, including CSRF handling, is unchanged.
+
+Phase 1 previously used ValueError for multiple failure categories. The two
+subclasses preserve existing ValueError callers; malformed fetched data now raises
+RuntimeError so a provider schema failure is not blamed on ticker input. Direct
+normalization still raises ValueError for malformed data. The existing broad catch
+is confined to the third-party download boundary; no broad catch was added in the
+view. Suppressed Yahoo errors can still become empty responses and therefore 404;
+that means data unavailable, not confirmed nonexistent listing. Development-only
+Django settings remain unchanged; this phase does not claim deployment readiness.
+
+### Dependencies and complexity
+
+No runtime dependencies were added. Existing requirements are unchanged. One view,
+one URL entry, two error types; no serializers, caches, models or helper frameworks.
+No frontend, metric-calculation or StockService changes. No migrations were run.
+
+### Validation and performance
+
+Safety checks confirmed a clean v1-foundation tree, repository-local Python 3.13.7,
+and healthy dependencies before editing. After implementation:
+- `python -m pip check` — PASS.
+- Backend `python manage.py check` — PASS, zero issues.
+- Backend `python manage.py test stocks` — PASS, 52 tests (43 Phase 1 + 9 new).
+- `git diff --check` — PASS; full diff and untracked URL file inspected.
+- `nl -ba` and AST inspection — verified the current source ranges above.
+- Live local Django Client GET `/api/stocks/QCOM/` through middleware and routing,
+  with real Yahoo data — PASS, HTTP 200, strict JSON, symbol/as_of/eight metrics,
+  finite Python numbers or None, as_of 2026-09-18T00:00:00. Spies measured exactly
+  one summary call, one market-data service call and one top-level yf.download.
+- GET `/api/stocks/A$PL/` — PASS, HTTP 400 JSON and zero downloads.
+
+No listening development server was needed or left running. These smoke checks
+used the real Django request stack in-process; they do not test a network listener.
+Counts describe application calls, not internal Yahoo HTTP requests. No commit,
+push, remote changes, dependency installation or staging occurred.
+
+## Phase 2A — Acceptance Review (2026-09-21)
+
+ACCEPT WITH FIXES. `normalize_ohlcv()` in
+`backend/stocks/services/market_data.py`, line 32, now checks for zero rows rather
+than DataFrame.empty. A frame with dated rows but no columns was incorrectly 404;
+it now follows schema validation and returns 502. None/zero-row responses remain
+404. No view, routing, metric, dependency or frontend changes were needed.
+
+`backend/stocks/tests.py`, lines 383–388 adds
+`test_dated_rows_without_columns_are_provider_failure()`; verified failing before
+the fix (404 != 502), then passing. Lines 390–396 adds
+`test_hyphenated_ticker_reaches_real_service()` for the missing BRK-B endpoint case.
+This log updates the current test-class range and records this acceptance pass.
+
+Validation: pip check PASS; manage.py check PASS; manage.py test stocks PASS
+(54 tests); git diff --check PASS; untracked stocks/urls.py whitespace PASS.
+AST comparison confirmed all Phase 1 test/helper bodies retain their meaning.
+Routing probes passed AAPL/aapl/BRK-B, malformed input, the normal missing-slash
+301 redirect, unrelated-path 404 and unchanged admin resolution. Unsupported
+methods reaching the view return 405 without constructing the service. Standard
+CSRF enforcement rejects a tokenless POST earlier with 403 and no analysis.
+
+Independent mock and post-fix live QCOM request traces passed: view=1, summary=1,
+market-data retrieval=1, yf.download=1; no additional application-level Yahoo calls
+in the mock trace. HTTP 200 JSON has the exact summary keys, finite floats/null,
+string as_of (2026-09-18T00:00:00 live), and eight metrics. Malformed ticker returns
+400 with zero downloads. Programming TypeError propagates to Django; handled
+service errors contain only fixed public messages. Development DEBUG remains a
+deployment limitation. No server was left running; nothing staged, committed or pushed.
