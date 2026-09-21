@@ -394,3 +394,176 @@ class StockSummaryAPITests(SimpleTestCase):
         self.assertEqual(response.json()["symbol"], "BRK-B")
         self.assertEqual(download.call_count, 1)
         self.assertEqual(download.call_args.args, ("BRK-B",))
+
+
+class StockHistoryTests(SimpleTestCase):
+    def setUp(self):
+        self.data = bars(range(100, 108))
+        # An older sentinel proves 1y preserves the full supplied dataset.
+        self.data.index = pd.to_datetime([
+            "2025-09-17", "2026-03-17", "2026-03-18", "2026-06-17",
+            "2026-06-18", "2026-08-17", "2026-08-18", "2026-09-18",
+        ]).tz_localize("America/New_York")
+
+    def test_exact_payload_all_ranges_and_one_download_each(self):
+        for history_range, start in [(None, 4), ("1m", 6), ("3m", 4), ("6m", 2), ("1y", 0)]:
+            with self.subTest(history_range=history_range):
+                expected = {
+                    "symbol": "BRK-B", "range": history_range or "3m",
+                    "as_of": "2026-09-18T00:00:00-04:00",
+                    "data": [
+                        {"date": self.data.index[i].date().isoformat(),
+                         "open": float(100 + i), "high": float(101 + i),
+                         "low": float(99 + i), "close": float(100 + i),
+                         "volume": 1_000_000.0}
+                        for i in range(start, 8)
+                    ],
+                }
+                with patch.object(market_data.yf, "download", return_value=self.data.iloc[::-1]) as download:
+                    with patch("stocks.services.stock_service.fetch_market_data", wraps=market_data.fetch_market_data) as fetch:
+                        response = self.client.get(
+                            "/api/stocks/brk-b/history/",
+                            {} if history_range is None else {"range": history_range},
+                        )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response["Content-Type"], "application/json")
+                self.assertEqual(response.json(), expected)
+                json.loads(response.content, parse_constant=lambda value: self.fail(value))
+                fetch.assert_called_once_with("BRK-B")
+                self.assertEqual(download.call_count, 1)
+                self.assertEqual(download.call_args.args, ("BRK-B",))
+
+    def test_calendar_month_end_includes_leap_day_cutoff(self):
+        data = bars([100, 101, 102])
+        data.index = pd.to_datetime(["2024-02-28", "2024-02-29", "2024-03-31"])
+        with patch("stocks.services.stock_service.fetch_market_data", return_value=data):
+            result = StockService("AAPL").history("1m")
+        self.assertEqual([row["date"] for row in result["data"]], ["2024-02-29", "2024-03-31"])
+
+    def test_service_returns_builtin_scalars_without_mutating_frame(self):
+        original = self.data.copy(deep=True)
+        with patch("stocks.services.stock_service.fetch_market_data", return_value=self.data) as fetch:
+            result = StockService(" aapl ").history()
+        self.assertEqual(result["symbol"], "AAPL")
+        for value in (result["symbol"], result["range"], result["as_of"]):
+            self.assertIs(type(value), str)
+        for row in result["data"]:
+            self.assertIs(type(row["date"]), str)
+            for key in ("open", "high", "low", "close", "volume"):
+                self.assertIs(type(row[key]), float)
+                self.assertTrue(math.isfinite(row[key]))
+        json.dumps(result, allow_nan=False)
+        pd.testing.assert_frame_equal(self.data, original)
+        fetch.assert_called_once_with("AAPL")
+
+    def test_invalid_range_rejected_before_retrieval(self):
+        for history_range in ("", "2m", "1d", "1M", "max"):
+            with self.subTest(history_range=history_range):
+                with patch("stocks.services.stock_service.fetch_market_data") as fetch:
+                    with patch.object(market_data.yf, "download") as download:
+                        response = self.client.get("/api/stocks/AAPL/history/", {"range": history_range})
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json(), {"error": "Invalid history range."})
+                fetch.assert_not_called()
+                download.assert_not_called()
+
+    def test_invalid_ticker_rejected_before_download(self):
+        with patch.object(market_data.yf, "download") as download:
+            response = self.client.get("/api/stocks/A$PL/history/")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"error": "Invalid ticker symbol."})
+        download.assert_not_called()
+
+    def test_no_data_returns_404(self):
+        for empty in (None, pd.DataFrame()):
+            with self.subTest(empty=type(empty).__name__):
+                with patch.object(market_data.yf, "download", return_value=empty):
+                    response = self.client.get("/api/stocks/AAPL/history/")
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.json(), {"error": "No market data available."})
+
+    def test_provider_and_schema_failures_return_fixed_502(self):
+        for failure in (TimeoutError("private details"), self.data.drop(columns="Volume")):
+            with self.subTest(failure=type(failure).__name__):
+                with patch.object(market_data.yf, "download", side_effect=[failure]):
+                    response = self.client.get("/api/stocks/AAPL/history/")
+                self.assertEqual(response.status_code, 502)
+                self.assertEqual(response.json(), {"error": "Market data provider failed."})
+
+    def test_nonfinite_provider_values_never_reach_json(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                malformed = self.data.copy()
+                malformed.iloc[-1, malformed.columns.get_loc("Close")] = value
+                with patch.object(market_data.yf, "download", return_value=malformed):
+                    response = self.client.get("/api/stocks/AAPL/history/")
+                self.assertEqual(response.status_code, 502)
+                self.assertEqual(response.json(), {"error": "Market data provider failed."})
+
+    def test_post_returns_405_without_constructing_service(self):
+        with patch("stocks.views.StockService") as service:
+            response = self.client.post("/api/stocks/AAPL/history/")
+        self.assertEqual(response.status_code, 405)
+        self.assertEqual(response["Allow"], "GET")
+        service.assert_not_called()
+
+
+class StockComparisonTests(SimpleTestCase):
+    def test_two_and_three_exact_summaries_order_and_call_counts(self):
+        for requested, symbols in [(" brk-b , aapl ", ["BRK-B", "AAPL"]),
+                                   (" nvda, brk-b ,aapl", ["NVDA", "BRK-B", "AAPL"])]:
+            with self.subTest(requested=requested):
+                # One bar makes all eight window metrics unavailable; summary
+                # prices identify each input's result independently of ordering.
+                expected = [
+                    {"symbol": symbol, "as_of": "2025-01-01T00:00:00+00:00",
+                     "price": float(100 + i), "open": float(100 + i),
+                     "metrics": {key: None for key in (
+                         "sma_20", "ema_20", "rsi_14", "return_30d", "average_return_30d",
+                         "volatility_20d", "adr_20d", "average_dollar_volume_20d",
+                     )}}
+                    for i, symbol in enumerate(symbols)
+                ]
+                with patch.object(market_data.yf, "download", side_effect=[bars([100 + i]) for i in range(len(symbols))]) as download:
+                    with patch("stocks.services.stock_service.fetch_market_data", wraps=market_data.fetch_market_data) as fetch:
+                        with patch.object(StockService, "summary", autospec=True, side_effect=StockService.summary) as summary:
+                            response = self.client.get("/api/compare/", {"symbols": requested})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json(), {"symbols": symbols, "results": expected})
+                json.loads(response.content, parse_constant=lambda value: self.fail(value))
+                self.assertEqual([call.args[0].symbol for call in summary.call_args_list], symbols)
+                self.assertEqual([call.args[0] for call in fetch.call_args_list], symbols)
+                self.assertEqual([call.args[0] for call in download.call_args_list], symbols)
+
+    def test_all_invalid_inputs_rejected_before_summary_or_network(self):
+        for requested in (None, "", "AAPL", "AAPL,NVDA,MSFT,QCOM", "AAPL,AAPL",
+                          "aapl, AAPL", "AAPL,NVDA,A$PL", "AAPL,", ",AAPL", "AAPL,,NVDA"):
+            with self.subTest(requested=requested):
+                with patch.object(StockService, "summary") as summary:
+                    with patch.object(market_data.yf, "download") as download:
+                        response = self.client.get("/api/compare/", {} if requested is None else {"symbols": requested})
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(set(response.json()), {"error"})
+                summary.assert_not_called()
+                download.assert_not_called()
+
+    def test_failure_of_second_symbol_is_atomic_and_stops_further_fetches(self):
+        for failure, status, error in (
+            (None, 404, "No market data available."),
+            (pd.DataFrame(), 404, "No market data available."),
+            (TimeoutError("private details"), 502, "Market data provider failed."),
+            (bars([100]).drop(columns="Volume"), 502, "Market data provider failed."),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                with patch.object(market_data.yf, "download", side_effect=[bars([100]), failure]) as download:
+                    response = self.client.get("/api/compare/", {"symbols": "AAPL,NVDA,QCOM"})
+                self.assertEqual(response.status_code, status)
+                self.assertEqual(response.json(), {"error": error})
+                self.assertEqual([call.args[0] for call in download.call_args_list], ["AAPL", "NVDA"])
+
+    def test_post_returns_405_without_constructing_service(self):
+        with patch("stocks.views.StockService") as service:
+            response = self.client.post("/api/compare/", {"symbols": "AAPL,NVDA"})
+        self.assertEqual(response.status_code, 405)
+        self.assertEqual(response["Allow"], "GET")
+        service.assert_not_called()

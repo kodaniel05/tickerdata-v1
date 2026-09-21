@@ -54,9 +54,9 @@ only the existing empty `backend/stocks/tests.py` was modified.
   for callers of the new engine. They never modify the supplied DataFrame.
 
 `backend/stocks/services/stock_service.py`
-- Lines 1–4 — imports the market-data boundary and pure metrics.
-- Lines 7–28 — `StockService`, comprising `__init__()` (8–9) and `summary()`
-  (11–28), normalizes the symbol and passes one fetched frame to every metric.
+- Lines 1–6 — imports pandas, the market-data boundary and pure metrics.
+- Lines 9–56 — `StockService`, including `__init__()` (10–11) and `summary()`
+  (13–30), normalizes the symbol and passes one fetched frame to every metric.
   Returns a plain dictionary with an ISO session timestamp for future JSON use.
 
 `backend/stocks/tests.py`
@@ -81,7 +81,7 @@ only the existing empty `backend/stocks/tests.py` was modified.
   Created before implementation so behavior can be reviewed independently.
 
 `docs/ENGINEERING_LOG.md`
-- Lines 1–312 — this document records scope, changed functions, verified ranges,
+- Lines 1–430 — this document records scope, changed functions, verified ranges,
   behavioral differences, validation evidence and limitations for human review.
 
 ### Behavioral changes
@@ -216,9 +216,9 @@ one-fetch contract and existing calculations. No API framework or database work.
 - `backend/config/settings.py`, line 40 — `INSTALLED_APPS`: registers StocksConfig
   so Django recognizes the existing application; unrelated defaults unchanged.
 - `backend/config/urls.py`, lines 18 and 22 — imports `include` and mounts the stock
-  URL configuration at `api/stocks/`; existing admin route retained.
-- `backend/stocks/urls.py`, lines 1–7 — new `urlpatterns` with a single string-ticker
-  route, named `stock-summary`; provides `/api/stocks/<ticker>/`.
+  URL configuration (now at `api/` after Phase 2B); existing admin route retained.
+- `backend/stocks/urls.py`, lines 1–9 — `urlpatterns`, with the summary route at
+  line 6, named `stock-summary`; still provides `/api/stocks/<ticker>/`.
 - `backend/stocks/views.py`, lines 1–18 — imports and `stock_summary()` (decorator
   at 8, function 9–18): calls StockService once, returns its dictionary directly,
   maps known failures, and uses require_GET and strict JSON serialization.
@@ -310,3 +310,121 @@ string as_of (2026-09-18T00:00:00 live), and eight metrics. Malformed ticker ret
 400 with zero downloads. Programming TypeError propagates to Django; handled
 service errors contain only fixed public messages. Development DEBUG remains a
 deployment limitation. No server was left running; nothing staged, committed or pushed.
+
+## Phase 2B — History and Comparison API
+
+Date: 2026-09-21.
+
+### Goal and changed files (current post-change ranges)
+
+Add daily chart history and 2–3-stock comparison using the existing data path.
+Preserve summary calculations and stop backend feature work at this scope.
+Ranges below were checked with `nl -ba` after implementation.
+
+- `backend/config/urls.py`, line 22 — `urlpatterns` mounts stocks at `api/`,
+  allowing comparison alongside stock routes without another URL module.
+- `backend/stocks/urls.py`, lines 3–9 — view imports and `urlpatterns` preserve
+  summary at line 6 and add history at 7 and comparison at 8.
+- `backend/stocks/services/stock_service.py`, lines 1–6 — description/imports;
+  reuses existing pandas dependency for calendar offsets. `StockService` (9–56)
+  adds `history()` (32–56): validate range before retrieval, slice one normalized
+  frame locally, serialize six chart fields into built-in strings/floats.
+  Existing `__init__()` (10–11) and `summary()` (13–30) bodies are unchanged.
+- `backend/stocks/views.py`, lines 21–33 — `stock_history()` (22–33, decorator 21)
+  maps request range and known failures to strict JSON. Lines 36–56 —
+  `stock_compare()` (37–56, decorator 36) validates all symbols before network
+  access, preserves order, rejects duplicates, then composes existing summaries.
+  `stock_summary()` (8–18 including decorator) is unchanged.
+- `backend/stocks/tests.py`, lines 399–508 — `StockHistoryTests`: nine tests for
+  exact payloads, all/default ranges, inclusive boundaries, leap-month cutoff,
+  Python types, frame purity, one fetch/download, input/data/provider errors,
+  nonfinite rejection and POST. Lines 511–569 — `StockComparisonTests`: four
+  tests for exact 2/3-summary payloads, order/normalization, counts, invalid-input
+  rejection before network, atomic failures and POST. Existing 54 tests unchanged.
+- `docs/ENGINEERING_LOG.md`, lines 57–59, 84 and 219–221 — refresh prior current
+  references; lines 314–390 — this phase's contracts, evidence and limitations.
+  No metric/data calculation contract changed, so `docs/METRICS.md` is unchanged.
+
+### Endpoint contracts and errors
+
+GET `/api/stocks/<ticker>/history/?range=3m` supports only `1m`, `3m`, `6m`, `1y`;
+omission defaults to `3m`. Month ranges include timestamps at/after the latest
+available bar minus 1/3/6 calendar months, including the cutoff; month ends clamp
+to the last valid day. `1y` returns the full fetched year. Result keys are
+`symbol`, `range`, `as_of`, `data`; chronological rows contain only `date` (ISO
+YYYY-MM-DD), `open`, `high`, `low`, `close`, `volume` (finite Python floats).
+`as_of` is the latest dataset timestamp in ISO format, retaining any timezone.
+GET `/api/compare/?symbols=AAPL,NVDA` requires 2–3 unique normalized symbols;
+whitespace/case use existing validation. Returns `symbols` and `results` in input
+order, with unmodified summary dictionaries. No ranking or additional metrics.
+Both return 200 on success, 400 for invalid input, 404 for unavailable data, 502
+for provider/schema failure, and normal require_GET 405 when reached. Fixed
+messages: `Invalid ticker symbol.`, `Invalid history range.`,
+`Provide 2 or 3 unique ticker symbols.`, `No market data available.`, and
+`Market data provider failed.` Comparison failure is atomic with no partial data;
+processing stops at the first fetch failure. All input validates before fetching.
+
+### Validation, performance, dependencies and limitations
+
+Baseline: clean `v1-foundation`, Phase 2A committed as `ac2e5c0`, local .venv
+Python 3.13.7, healthy dependencies, Django check PASS and 54 tests PASS.
+Final: pip check PASS; Django check PASS; 67 tests PASS (54 existing + 13 new);
+git diff --check PASS. Full diff/status inspected; no new untracked files.
+AST comparison confirmed existing service/view/test function bodies unchanged.
+Deterministic spies verified history = 1 retrieval/1 download for every range;
+comparison N=2 and N=3 = N summary calls/N retrievals/N downloads in input order.
+Live in-process Django Client (localhost), real Yahoo: QCOM history 1m HTTP 200,
+strict JSON, 23 ascending rows from 2026-08-18 through as_of 2026-09-18T00:00:00;
+1 retrieval/1 download. QCOM,AAPL comparison HTTP 200, correct order, strict JSON,
+2 summaries/2 retrievals/2 downloads, 0.749 seconds wall clock (diagnostic only).
+Invalid QCOM,A$PL comparison: 400, zero downloads. Source inspection confirms
+the only application-level yfinance data call is yf.download; counts exclude
+provider-internal HTTP requests. No listening server was needed or left running.
+No runtime dependencies were added; requirements.txt is unchanged. Runtime diff:
+72 added/4 removed lines (net +68, including whitespace), three new functions/
+methods, zero new classes/files. No duplicate metric/data path, extra frame copy,
+cache, concurrency or speculative helpers; fixed HTTP error mapping repeats the
+small existing view pattern. Limits: daily only, at most the fetched one-year
+history, atomic sequential comparisons, no cache; Yahoo availability and existing
+development-only settings remain limitations. No frontend changes, staging,
+commits, pushes, remote changes or dependency installations.
+
+## Phase 2B — Acceptance Review (2026-09-21)
+
+ACCEPT WITH FIXES to test data only; no runtime defect found. All requested
+source/documents and the current diff were reviewed before editing. The existing
+1y fixture could not distinguish full-dataset passthrough from a new yearly
+cutoff. A deliberate in-memory re-cut implementation passed the original tests.
+`backend/stocks/tests.py`, `StockHistoryTests.setUp()` (400–406), now includes
+an older sentinel (comment 402, date 404); the existing exact-payload test
+(408–434) now rejects that implementation. No new test method or runtime change.
+Current class ranges are history 399–508 and comparison 511–569.
+
+Mutation checks with a passing original-code control also rejected fixed
+30/90/180-day windows, exclusive cutoffs, all-history windows, dropped latest
+rows, reversed order and duplicate retrievals. Temporary harness setup errors
+were corrected before using these results; no mutants were written to disk.
+Independent month-end probes confirmed 2026-03-31 minus 1 month and 2026-05-31
+minus 3 months both include 2026-02-28 and exclude 2026-02-27. Leap-year behavior
+remains covered. Strict JSON probes confirmed six row fields, distinct Open/Close
+values, finite numbers, ascending dates and no extra provider columns.
+
+Independent mock traces: history = 0 summaries/1 retrieval/1 normalization/
+1 download; two/three-stock comparisons = 2/3 of each. Additional direct
+Ticker/Tickers calls = 0. AAPL,BAD/SYMBOL = 400 with zero summaries/retrievals/
+downloads. Later valid-symbol no-data/provider/schema failures = 404/502 with
+no partial payload or third fetch; earlier successful fetches can already have
+occurred. Input validation, unlike provider failures, completes before any fetch.
+All three routes, admin resolution, unrelated 404, slash redirect, GET-only 405
+and standard middleware CSRF 403 were verified. Views and dependencies stay small.
+
+Revalidation: pip check PASS; Django check PASS; all 67 tests PASS (0.246s),
+including the preexisting 54; git diff --check PASS. Live rerun after deterministic
+validation: QCOM history 1m HTTP 200, strict JSON, 21 ascending rows from 2026-08-21
+through as_of 2026-09-21T00:00:00, 1 retrieval/1 download. QCOM,AAPL comparison
+HTTP 200, correct order, strict JSON, 2 summaries/2 retrievals/2 downloads;
+0.635 seconds wall clock, diagnostic only. Counts exclude provider-internal HTTP.
+Requirements and METRICS.md remain unchanged; daily/year-bounded, sequential,
+atomic, no-cache and development-settings limitations remain accurately recorded.
+This section and current references were checked with nl -ba. No frontend work,
+dependencies, staging, commits, pushes, remote changes or server left running.
